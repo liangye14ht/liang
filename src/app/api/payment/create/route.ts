@@ -1,11 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabase';
+import { createNativeOrder, plans, generateOrderId, payConfig } from '@/lib/wechat-pay';
 
-// POST /api/payment/create - 创建支付订单
+// POST /api/payment/create - 创建支付订单（Native支付）
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const { planId } = body;
+    const { planId, userId = 'anonymous' } = body;
     
     if (!planId) {
       return NextResponse.json(
@@ -15,11 +16,6 @@ export async function POST(request: NextRequest) {
     }
     
     // 验证套餐
-    const plans: Record<string, { price: number; name: string }> = {
-      basic: { price: 2900, name: '个人版' }, // 单位：分
-      pro: { price: 9900, name: '专业版' },
-    };
-    
     const plan = plans[planId];
     if (!plan) {
       return NextResponse.json(
@@ -28,19 +24,27 @@ export async function POST(request: NextRequest) {
       );
     }
     
+    // 检查配置
+    if (!payConfig.mchid || !payConfig.appid) {
+      return NextResponse.json(
+        { error: '支付配置未完成，请联系管理员' },
+        { status: 500 }
+      );
+    }
+    
     // 生成订单号
-    const orderId = `ORDER_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    const orderId = generateOrderId();
     
     // 保存订单到数据库
     const { error: insertError } = await supabaseAdmin
       .from('payments')
       .insert({
         order_id: orderId,
-        user_id: 'anonymous', // TODO: 替换为实际用户ID
+        user_id: userId,
         plan: planId,
         amount: plan.price,
         status: 'pending',
-        expires_at: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(), // 30天后过期
+        expires_at: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
       });
     
     if (insertError) {
@@ -51,70 +55,45 @@ export async function POST(request: NextRequest) {
       );
     }
     
-    // TODO: 接入实际支付网关（微信支付/支付宝）
-    // 目前返回模拟数据
-    
-    return NextResponse.json({
-      orderId,
-      planId,
-      amount: plan.price,
-      planName: plan.name,
-      // 支付链接（实际接入时返回）
-      // paymentUrl: `https://pay.example.com/${orderId}`,
-      // 或返回二维码URL
-      // qrCode: `https://api.example.com/qr/${orderId}`,
+    // 调用微信支付接口创建Native支付订单
+    try {
+      const result = await createNativeOrder({
+        description: plan.description,
+        outTradeNo: orderId,
+        amount: plan.price,
+        attach: JSON.stringify({ planId, userId }),
+      });
       
-      // 模拟数据
-      message: '支付系统接入中，即将上线',
-      mockMode: true,
-    });
+      // 返回支付二维码链接
+      return NextResponse.json({
+        orderId,
+        planId,
+        amount: plan.price,
+        planName: plan.name,
+        qrCode: result.code_url, // 微信支付二维码链接
+        // 也可以返回转换为二维码图片的URL
+        qrCodeImage: `https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${encodeURIComponent(result.code_url)}`,
+      });
+      
+    } catch (payError: any) {
+      console.error('WeChat Pay error:', payError);
+      
+      // 如果微信支付调用失败，返回模拟数据（开发/测试模式）
+      return NextResponse.json({
+        orderId,
+        planId,
+        amount: plan.price,
+        planName: plan.name,
+        // 模拟二维码（指向支付状态查询页面）
+        qrCode: `${process.env.NEXT_PUBLIC_APP_URL}/api/payment/mock?orderId=${orderId}`,
+        qrCodeImage: `https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${encodeURIComponent(`${process.env.NEXT_PUBLIC_APP_URL}/api/payment/mock?orderId=${orderId}`)}`,
+        mockMode: true,
+        message: '微信支付配置中，当前为演示模式',
+      });
+    }
     
   } catch (error) {
     console.error('Payment API error:', error);
-    return NextResponse.json(
-      { error: '服务器错误' },
-      { status: 500 }
-    );
-  }
-}
-
-// GET /api/payment/status - 查询支付状态
-export async function GET(request: NextRequest) {
-  try {
-    const { searchParams } = new URL(request.url);
-    const orderId = searchParams.get('orderId');
-    
-    if (!orderId) {
-      return NextResponse.json(
-        { error: '缺少订单号' },
-        { status: 400 }
-      );
-    }
-    
-    const { data, error } = await supabaseAdmin
-      .from('payments')
-      .select('*')
-      .eq('order_id', orderId)
-      .single();
-    
-    if (error || !data) {
-      return NextResponse.json(
-        { error: '订单不存在' },
-        { status: 404 }
-      );
-    }
-    
-    return NextResponse.json({
-      orderId: data.order_id,
-      status: data.status,
-      plan: data.plan,
-      amount: data.amount,
-      paidAt: data.paid_at,
-      expiresAt: data.expires_at,
-    });
-    
-  } catch (error) {
-    console.error('Payment status error:', error);
     return NextResponse.json(
       { error: '服务器错误' },
       { status: 500 }
