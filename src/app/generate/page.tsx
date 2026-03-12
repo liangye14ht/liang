@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -8,7 +8,10 @@ import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Sparkles, Copy, RefreshCw, Loader2 } from "lucide-react";
+import { Sparkles, Copy, RefreshCw, Loader2, Check, History, ThumbsUp, ThumbsDown } from "lucide-react";
+import { GenerationHistory } from "@/components/generation-history";
+import { useToast } from "@/hooks/use-toast";
+import { Toaster } from "@/components/ui/toaster";
 
 const contentTypes = [
   { value: "种草", label: "🛍️ 种草推荐" },
@@ -32,13 +35,17 @@ const lengths = [
 ];
 
 interface GenerationResult {
+  id?: string;
+  topic?: string;
   titles: string[];
   content: string;
   tags: string[];
 }
 
 export default function GeneratePage() {
+  const { toast } = useToast();
   const [isLoading, setIsLoading] = useState(false);
+  const [copied, setCopied] = useState<string | null>(null);
   const [formData, setFormData] = useState({
     contentType: "种草",
     topic: "",
@@ -50,7 +57,10 @@ export default function GeneratePage() {
   const [result, setResult] = useState<GenerationResult | null>(null);
   const [error, setError] = useState("");
   const [remainingQuota, setRemainingQuota] = useState(3);
+  const [showHistory, setShowHistory] = useState(false);
+  const [feedbackGiven, setFeedbackGiven] = useState(false);
 
+  // 生成内容
   const handleGenerate = async () => {
     if (!formData.topic.trim()) {
       setError("请输入主题");
@@ -59,6 +69,7 @@ export default function GeneratePage() {
     
     setIsLoading(true);
     setError("");
+    setFeedbackGiven(false);
     
     try {
       const response = await fetch("/api/generate", {
@@ -76,6 +87,7 @@ export default function GeneratePage() {
       }
       
       setResult({
+        id: data.id,
         titles: data.titles,
         content: data.content,
         tags: data.tags,
@@ -84,19 +96,91 @@ export default function GeneratePage() {
       if (data.usage?.remaining !== undefined) {
         setRemainingQuota(data.usage.remaining);
       }
+      
+      toast({
+        title: "生成成功！",
+        description: "内容已保存到历史记录",
+      });
+      
     } catch (err) {
       setError(err instanceof Error ? err.message : "生成失败，请重试");
+      toast({
+        title: "生成失败",
+        description: err instanceof Error ? err.message : "请稍后重试",
+        variant: "destructive",
+      });
     } finally {
       setIsLoading(false);
     }
   };
 
-  const copyToClipboard = (text: string) => {
-    navigator.clipboard.writeText(text);
+  // 一键复制
+  const copyToClipboard = async (text: string, label: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(label);
+      toast({
+        title: "已复制！",
+        description: `${label}已复制到剪贴板`,
+      });
+      setTimeout(() => setCopied(null), 2000);
+    } catch (err) {
+      toast({
+        title: "复制失败",
+        description: "请手动复制",
+        variant: "destructive",
+      });
+    }
+  };
+
+  // 复制完整内容（标题+正文+标签）
+  const copyFullContent = () => {
+    if (!result) return;
+    const fullContent = `${result.titles[0] || ''}\n\n${result.content}\n\n${result.tags.join(' ')}`;
+    copyToClipboard(fullContent, '完整内容');
+  };
+
+  // 从历史记录选择
+  const handleHistorySelect = (item: GenerationResult) => {
+    setResult(item);
+    setFormData(prev => ({
+      ...prev,
+      topic: item.topic || prev.topic,
+    }));
+    toast({
+      title: "已加载历史记录",
+      description: "点击重新生成可基于相同主题再创作",
+    });
+  };
+
+  // 提交反馈
+  const submitFeedback = async (type: 'like' | 'dislike') => {
+    if (!result?.id || feedbackGiven) return;
+    
+    try {
+      await fetch('/api/feedback', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          generationId: result.id,
+          type,
+        }),
+      });
+      
+      setFeedbackGiven(true);
+      toast({
+        title: type === 'like' ? "感谢好评！" : "感谢反馈",
+        description: type === 'like' ? "我们会继续优化生成质量" : "我们会改进生成效果",
+      });
+    } catch (err) {
+      console.error('Feedback error:', err);
+    }
   };
 
   return (
     <div className="min-h-screen bg-gray-50">
+      <Toaster />
+      
       {/* Header */}
       <header className="border-b bg-white sticky top-0 z-50">
         <div className="max-w-6xl mx-auto px-4 h-16 flex items-center justify-between">
@@ -104,12 +188,22 @@ export default function GeneratePage() {
             <Sparkles className="w-6 h-6 text-pink-500" />
             <span className="font-bold">小红书AI写作助手</span>
           </a>
-          <Badge variant="secondary">今日剩余 {remainingQuota} 次</Badge>
+          <div className="flex items-center gap-4">
+            <Badge variant="secondary">今日剩余 {remainingQuota} 次</Badge>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => setShowHistory(!showHistory)}
+            >
+              <History className="w-4 h-4 mr-2" />
+              历史
+            </Button>
+          </div>
         </div>
       </header>
 
       <div className="max-w-6xl mx-auto px-4 py-8">
-        <div className="grid lg:grid-cols-2 gap-8">
+        <div className={`grid gap-8 ${showHistory ? 'lg:grid-cols-3' : 'lg:grid-cols-2'}`}>
           {/* Input Form */}
           <Card>
             <CardHeader>
@@ -239,8 +333,22 @@ export default function GeneratePage() {
 
           {/* Result Display */}
           <Card>
-            <CardHeader>
+            <CardHeader className="flex flex-row items-center justify-between">
               <CardTitle>生成结果</CardTitle>
+              {result && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={copyFullContent}
+                >
+                  {copied === '完整内容' ? (
+                    <Check className="w-4 h-4 mr-2" />
+                  ) : (
+                    <Copy className="w-4 h-4 mr-2" />
+                  )}
+                  一键复制
+                </Button>
+              )}
             </CardHeader>
             <CardContent>
               {!result ? (
@@ -249,68 +357,130 @@ export default function GeneratePage() {
                   <p>左侧填写信息后点击生成</p>
                 </div>
               ) : (
-                <Tabs defaultValue="content" className="w-full">
-                  <TabsList className="w-full">
-                    <TabsTrigger value="content" className="flex-1">正文</TabsTrigger>
-                    <TabsTrigger value="titles" className="flex-1">标题选项</TabsTrigger>
-                  </TabsList>
+                <>
+                  <Tabs defaultValue="content" className="w-full">
+                    <TabsList className="w-full">
+                      <TabsTrigger value="content" className="flex-1">正文</TabsTrigger>
+                      <TabsTrigger value="titles" className="flex-1">标题选项</TabsTrigger>
+                    </TabsList>
 
-                  <TabsContent value="content" className="space-y-4">
-                    <div className="relative">
-                      <Textarea
-                        value={result.content}
-                        rows={20}
-                        className="font-mono text-sm resize-none"
-                        readOnly
-                      />
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        className="absolute top-2 right-2"
-                        onClick={() => copyToClipboard(result.content)}
-                      >
-                        <Copy className="w-4 h-4" />
-                      </Button>
-                    </div>
-                    <div className="flex gap-2 flex-wrap">
-                      {result.tags.map((tag) => (
-                        <Badge key={tag} variant="secondary">{tag}</Badge>
-                      ))}
-                    </div>
-                  </TabsContent>
-
-                  <TabsContent value="titles" className="space-y-3">
-                    {result.titles.map((title, index) => (
-                      <div key={index} className="flex items-center gap-2">
-                        <div className="flex-1 p-3 bg-gray-50 rounded-lg text-sm">
-                          {title}
-                        </div>
+                    <TabsContent value="content" className="space-y-4">
+                      <div className="relative">
+                        <Textarea
+                          value={result.content}
+                          rows={16}
+                          className="font-mono text-sm resize-none"
+                          readOnly
+                        />
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="absolute top-2 right-2"
+                          onClick={() => copyToClipboard(result.content, '正文')}
+                        >
+                          {copied === '正文' ? (
+                            <Check className="w-4 h-4" />
+                          ) : (
+                            <Copy className="w-4 h-4" />
+                          )}
+                        </Button>
+                      </div>
+                      <div className="flex gap-2 flex-wrap">
+                        {result.tags.map((tag) => (
+                          <Badge key={tag} variant="secondary">{tag}</Badge>
+                        ))}
                         <Button
                           variant="ghost"
                           size="sm"
-                          onClick={() => copyToClipboard(title)}
+                          onClick={() => copyToClipboard(result.tags.join(' '), '标签')}
                         >
-                          <Copy className="w-4 h-4" />
+                          {copied === '标签' ? (
+                            <Check className="w-3 h-3" />
+                          ) : (
+                            <Copy className="w-3 h-3" />
+                          )}
                         </Button>
                       </div>
-                    ))}
-                  </TabsContent>
-                </Tabs>
-              )}
+                    </TabsContent>
 
-              {result && (
-                <Button
-                  variant="outline"
-                  className="w-full mt-4"
-                  onClick={handleGenerate}
-                  disabled={isLoading}
-                >
-                  <RefreshCw className="w-4 h-4 mr-2" />
-                  重新生成
-                </Button>
+                    <TabsContent value="titles" className="space-y-3">
+                      {result.titles.map((title, index) => (
+                        <div key={index} className="flex items-center gap-2">
+                          <div className="flex-1 p-3 bg-gray-50 rounded-lg text-sm">
+                            {title}
+                          </div>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => copyToClipboard(title, `标题${index + 1}`)}
+                          >
+                            {copied === `标题${index + 1}` ? (
+                              <Check className="w-4 h-4" />
+                            ) : (
+                              <Copy className="w-4 h-4" />
+                            )}
+                          </Button>
+                        </div>
+                      ))}
+                    </TabsContent>
+                  </Tabs>
+
+                  {/* Feedback & Actions */}
+                  <div className="mt-6 pt-4 border-t space-y-4">
+                    <div className="flex items-center justify-between">
+                      <span className="text-sm text-gray-500">生成结果满意吗？</span>
+                      <div className="flex gap-2">
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => submitFeedback('like')}
+                          disabled={feedbackGiven}
+                          className={feedbackGiven ? 'text-green-500' : ''}
+                        >
+                          <ThumbsUp className="w-4 h-4 mr-1" />
+                          好用
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => submitFeedback('dislike')}
+                          disabled={feedbackGiven}
+                          className={feedbackGiven ? 'text-red-500' : ''}
+                        >
+                          <ThumbsDown className="w-4 h-4 mr-1" />
+                          待改进
+                        </Button>
+                      </div>
+                    </div>
+                    
+                    <Button
+                      variant="outline"
+                      className="w-full"
+                      onClick={handleGenerate}
+                      disabled={isLoading}
+                    >
+                      <RefreshCw className="w-4 h-4 mr-2" />
+                      重新生成
+                    </Button>
+                  </div>
+                </>
               )}
             </CardContent>
           </Card>
+
+          {/* History Panel */}
+          {showHistory && (
+            <GenerationHistory
+              onSelect={handleHistorySelect}
+              onRegenerate={(item) => {
+                setFormData(prev => ({
+                  ...prev,
+                  topic: item.topic || prev.topic,
+                }));
+                handleGenerate();
+              }}
+            />
+          )}
         </div>
       </div>
     </div>
